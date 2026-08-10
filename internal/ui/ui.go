@@ -73,9 +73,10 @@ type Summary struct {
 }
 
 type scoutedMsg struct {
-	url    string
-	tracks []scout.Track
-	err    error
+	url      string
+	tracks   []scout.Track
+	warnings []string
+	err      error
 }
 
 type eventMsg fetch.Event
@@ -124,8 +125,8 @@ func (m *Model) Init() tea.Cmd {
 
 func (m *Model) scoutCmd(url string) tea.Cmd {
 	return func() tea.Msg {
-		tracks, err := scout.Expand(m.ctx, url)
-		return scoutedMsg{url: url, tracks: tracks, err: err}
+		tracks, warnings, err := scout.Expand(m.ctx, url)
+		return scoutedMsg{url: url, tracks: tracks, warnings: warnings, err: err}
 	}
 }
 
@@ -166,6 +167,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) onScouted(msg scoutedMsg) (tea.Model, tea.Cmd) {
 	m.pending--
+	m.errs = append(m.errs, msg.warnings...)
 	if msg.err != nil {
 		m.errs = append(m.errs, msg.err.Error())
 	} else {
