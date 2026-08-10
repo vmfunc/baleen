@@ -194,9 +194,11 @@ func (m *Model) onEvent(ev fetch.Event) {
 	r := &m.rows[ev.Idx]
 	switch ev.Kind {
 	case fetch.Started:
-		r.state = stateActive
+		r.state, r.detail = stateActive, ""
 	case fetch.Progress:
 		r.pct = ev.Pct
+	case fetch.Backoff:
+		r.detail = ev.Detail
 	case fetch.Done:
 		r.state, r.pct = stateDone, 100
 	case fetch.Skipped:
@@ -279,8 +281,12 @@ func (m *Model) viewFetch(b *strings.Builder) {
 func renderRow(r row, spin string, bar progress.Model) (string, bool) {
 	switch r.state {
 	case stateActive:
-		return fmt.Sprintf("  %s %s %s", spin, bar.ViewAs(r.pct/100),
-			textStyle.Render(clip(name(r.track)))), true
+		line := fmt.Sprintf("  %s %s %s", spin, bar.ViewAs(r.pct/100),
+			textStyle.Render(clip(name(r.track))))
+		if r.detail != "" {
+			line += skipStyle.Render("  " + r.detail)
+		}
+		return line, true
 	case stateFailed:
 		return failStyle.Render("  ✗ " + clip(name(r.track)+" — "+r.detail)), true
 	case stateSkipped:

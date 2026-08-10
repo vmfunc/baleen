@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -18,7 +19,13 @@ import (
 	"github.com/vmfunc/baleen/internal/ui"
 )
 
-const defaultJobs = 3
+const (
+	defaultJobs = 3
+	// soundcloud's api starts refusing after a burst of unthrottled metadata
+	// calls; one launch every 2s stays comfortably under it.
+	defaultPace    = 2 * time.Second
+	defaultRetries = 4
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -35,6 +42,8 @@ func run() error {
 	dest := flag.String("dest", filepath.Join(home, "Music"), "library root")
 	jobs := flag.Int("jobs", defaultJobs, "concurrent downloads")
 	archive := flag.String("archive", "", "download archive (default <dest>/.baleen-archive.txt)")
+	pace := flag.Duration("pace", defaultPace, "min interval between download launches")
+	retries := flag.Int("retries", defaultRetries, "extra attempts per track after a rate-limit 403")
 	flag.Parse()
 
 	if *archive == "" {
@@ -53,7 +62,7 @@ func run() error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	opts := fetch.Options{Dest: *dest, Archive: *archive, Jobs: *jobs}
+	opts := fetch.Options{Dest: *dest, Archive: *archive, Jobs: *jobs, Pace: *pace, Retries: *retries}
 	model := ui.New(ctx, cancel, urls, opts)
 	prog := tea.NewProgram(model, tea.WithInput(os.Stdin), tea.WithInputTTY())
 	if _, err := prog.Run(); err != nil {

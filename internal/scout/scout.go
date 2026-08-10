@@ -83,7 +83,10 @@ func expand(ctx context.Context, url string, depth int) ([]Track, error) {
 }
 
 func probe(ctx context.Context, url string) (*entry, error) {
-	cmd := exec.CommandContext(ctx, "yt-dlp", "-J", "--flat-playlist", "--no-warnings", url)
+	// likes pages paginate through many api calls; unthrottled they trip the
+	// same rate limiter the downloads do.
+	cmd := exec.CommandContext(ctx, "yt-dlp", "-J", "--flat-playlist", "--no-warnings",
+		"--sleep-requests", "1", url)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("probing %s: %w (%s)", url, err, exitDetail(err))

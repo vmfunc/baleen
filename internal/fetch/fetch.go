@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vmfunc/baleen/internal/scout"
 )
@@ -25,6 +26,7 @@ const (
 	Done
 	Skipped
 	Failed
+	Backoff
 )
 
 // Event reports one state change for the track at Idx.
@@ -37,10 +39,17 @@ type Event struct {
 
 // Options configures a pool run.
 type Options struct {
-	Dest    string // library root, e.g. ~/Music
-	Archive string // yt-dlp download archive path
+	Dest    string        // library root, e.g. ~/Music
+	Archive string        // yt-dlp download archive path
 	Jobs    int
+	Pace    time.Duration // min interval between yt-dlp launches, shared by all workers
+	Retries int           // extra attempts per track after a rate-limit 403
 }
+
+// backoffBase is the first 403 cool-down; each further attempt doubles it.
+// soundcloud's ip block decays on the order of minutes, so short retries
+// inside one track are pointless and long ones stall the whole pool.
+const backoffBase = 45 * time.Second
 
 var progressRe = regexp.MustCompile(`\[download\]\s+([0-9.]+)%`)
 
@@ -56,16 +65,22 @@ func Run(ctx context.Context, tracks []scout.Track, o Options) <-chan Event {
 		defer close(events)
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, o.Jobs)
+		pacer := time.NewTicker(o.Pace)
+		defer pacer.Stop()
 		for i, t := range tracks {
 			if ctx.Err() != nil {
 				break
+			}
+			select {
+			case <-pacer.C: // one launch per pace interval, across all workers
+			case <-ctx.Done():
 			}
 			sem <- struct{}{}
 			wg.Add(1)
 			go func(idx int, tr scout.Track) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				download(ctx, idx, tr, o, events)
+				attempt(ctx, idx, tr, o, events)
 			}(i, t)
 		}
 		wg.Wait()
@@ -73,31 +88,54 @@ func Run(ctx context.Context, tracks []scout.Track, o Options) <-chan Event {
 	return events
 }
 
-func download(ctx context.Context, idx int, t scout.Track, o Options, events chan<- Event) {
+// attempt runs download with 403-aware backoff: a rate-limit refusal parks the
+// worker instead of burning the track, because the block is per-ip and decays.
+func attempt(ctx context.Context, idx int, t scout.Track, o Options, events chan<- Event) {
+	for try := 0; ; try++ {
+		detail, ok := download(ctx, idx, t, o, events)
+		if ok || ctx.Err() != nil {
+			return
+		}
+		rateLimited := strings.Contains(detail, "403")
+		if !rateLimited || try >= o.Retries {
+			events <- Event{Idx: idx, Kind: Failed, Detail: detail}
+			return
+		}
+		wait := backoffBase << try
+		events <- Event{Idx: idx, Kind: Backoff, Detail: fmt.Sprintf("rate limited, waiting %s", wait)}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// download runs one yt-dlp invocation; on success it emits Done/Skipped and
+// returns ok, on failure it returns the error detail for attempt to judge.
+func download(ctx context.Context, idx int, t scout.Track, o Options, events chan<- Event) (string, bool) {
 	events <- Event{Idx: idx, Kind: Started}
 	cmd := exec.CommandContext(ctx, "yt-dlp", args(t, o)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		events <- Event{Idx: idx, Kind: Failed, Detail: fmt.Sprintf("pipe: %v", err)}
-		return
+		return fmt.Sprintf("pipe: %v", err), false
 	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		events <- Event{Idx: idx, Kind: Failed, Detail: fmt.Sprintf("start: %v", err)}
-		return
+		return fmt.Sprintf("start: %v", err), false
 	}
 
 	skipped := scanProgress(stdout, idx, events)
 	if err := cmd.Wait(); err != nil {
-		events <- Event{Idx: idx, Kind: Failed, Detail: lastLine(stderr.String())}
-		return
+		return lastLine(stderr.String()), false
 	}
 	if skipped {
 		events <- Event{Idx: idx, Kind: Skipped}
-		return
+		return "", true
 	}
 	events <- Event{Idx: idx, Kind: Done}
+	return "", true
 }
 
 // scanProgress forwards percent updates and reports whether the archive
